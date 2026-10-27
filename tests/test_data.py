@@ -294,6 +294,56 @@ class TestFeatures:
     # 30/90/180-day frequencies) from processed rows with purchase_date <=
     # FEATURE_CUTOFF -- your data/feature_engineering.py functions do this --
     # and assert they equal what the pipeline wrote to features/.
+    def test_time_sensitive_features_use_only_pre_cutoff_data(
+        self, processed_df, features_df):
+        history = processed_df.loc[
+            processed_df["purchase_date"] <= FEATURE_CUTOFF
+        ].copy()
+
+        customer_ids = pd.Index(features_df["customer_id"], name="customer_id")
+        history = history[history["customer_id"].isin(customer_ids)]
+
+        grouped = history.groupby("customer_id")["purchase_date"]
+        dates = grouped.agg(first_purchase="min", last_purchase="max")
+
+        expected = pd.DataFrame(index=customer_ids)
+        expected["days_since_last_purchase"] = (
+            FEATURE_CUTOFF - dates["last_purchase"]
+        ).dt.days.reindex(customer_ids)
+        expected["customer_tenure_days"] = (
+            FEATURE_CUTOFF - dates["first_purchase"]
+        ).dt.days.reindex(customer_ids)
+
+        for days in (30, 90, 180):
+            window_start = FEATURE_CUTOFF - pd.Timedelta(days=days)
+            counts = (
+                history.loc[history["purchase_date"] > window_start]
+                .groupby("customer_id")
+                .size()
+            )
+            column = f"purchase_frequency_{days}d"
+            expected[column] = counts.reindex(customer_ids, fill_value=0).to_numpy()
+
+        actual = features_df.set_index("customer_id").reindex(customer_ids)
+
+        assert not expected.isna().any().any(), (
+            "Some feature customers have no pre-cutoff purchase history"
+        )
+
+        columns = [
+            "days_since_last_purchase",
+            "customer_tenure_days",
+            "purchase_frequency_30d",
+            "purchase_frequency_90d",
+            "purchase_frequency_180d",
+        ]
+        for column in columns:
+            mismatches = actual[column] != expected[column]
+            assert not mismatches.any(), (
+                f"{column} differs from its pre-cutoff recomputation for "
+                f"{mismatches.sum()} customers"
+            )
+
 
     # TODO: Add a freshness test. The pipeline should refuse to train on a
     # feature set older than 48 hours. event_time is Fractional epoch seconds:
@@ -301,6 +351,18 @@ class TestFeatures:
     # Consequence: re-run the northstar-dev-feature-engineer Glue job (~90 s)
     # before any session in which you will push, or this test fails the build.
 
+    def test_freshness(self, features_df):
+        """Latest event_time is less than 48 hours"""
+        event_times = pd.to_numeric(features_df["event_time"], errors="coerce")
+        latest_event_time = event_times.max()
+
+        assert pd.notna(latest_event_time), "No valid event_time found"
+
+        age_seconds = pd.Timestamp.now(tz="UTC").timestamp() - latest_event_time
+        assert 0 <= age_seconds <= 48 * 60 * 60, (
+            f"Feature set is {age_seconds / 3600:.1f} hours old; maximum is 48"
+        )
+        
 
 # ── Cross-dataset consistency ─────────────────────────────────────────────────
 
