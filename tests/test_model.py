@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+import warnings
 
 try:
     import xgboost as xgb
@@ -193,6 +194,7 @@ class TestPredictionOutput:
 
         assert predictions.min() >= 0.0, f"Predictions below 0: {predictions.min():.4f}"
         assert predictions.max() <= 1.0, f"Predictions above 1: {predictions.max():.4f}"
+        assert len(predictions) == len(features)
 
     def test_predictions_have_no_nans(self, loaded_model, synthetic_churn_batch):
         features = synthetic_churn_batch[FEATURE_COLUMNS]
@@ -400,15 +402,26 @@ class TestStoredMetricsGate:
         Not a threshold on the point estimate. A lift of +0.05 with a CI of
         [-0.01, 0.11] is not evidence of anything; a lift of +0.02 with a CI
         of [0.005, 0.035] is. The baseline is the recency-only model, not a
-        constant predictor - beating a coin flip proves nothing.
+        constant predictor - beating a coin flip proves nothing.F
         """
+        
+        required = {"auc_roc", "baseline_auc_roc", "lift_ci_low", "lift_ci_high"}
+        missing = required - eval_metrics.keys()
+        assert not missing, f"Evaluation metrics missing: {sorted(missing)}"
+
+
         lo = eval_metrics.get("lift_ci_low")
         hi = eval_metrics.get("lift_ci_high")
+
         assert lo is not None and hi is not None, (
             "lift_ci_low/lift_ci_high missing from evaluation metrics. The "
             "training script must emit a bootstrap CI on the lift over the "
             "recency-only baseline."
         )
+        assert lo <= hi, (
+            "Not valid CI"
+        )
+
         assert lo > 0, (
             f"Lift 95% CI [{lo:.4f}, {hi:.4f}] includes zero. No evidence the "
             f"model beats the recency-only baseline; it will not be promoted."
@@ -424,3 +437,9 @@ class TestStoredMetricsGate:
             f"The reference dataset measures 22.0%. Check that your validation "
             f"split is stratified."
         )
+
+    def test_regression_check(self, eval_metrics, champion_auc):
+        new_AUC = eval_metrics['auc_roc']
+
+        warnings.warn(f"champion auc={champion_auc:.4f}; candidate auc={new_AUC:.4f}")
+        assert new_AUC >= (champion_auc - 0.02)

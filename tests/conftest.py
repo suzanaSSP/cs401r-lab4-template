@@ -22,6 +22,7 @@ Keep option registration here.
 """
 
 import os
+import pytest
 
 
 def pytest_addoption(parser):
@@ -32,6 +33,13 @@ def pytest_addoption(parser):
     parser.addoption(
         "--eval-metrics-path", action="store", default=None,
         help="Path to evaluation_metrics.json emitted by the training script"
+    )
+
+    parser.addoption(
+        "--champion-auc",
+        action='store',
+        default=None,
+        help="AUC of the latest approved champion model",
     )
 
 
@@ -45,3 +53,16 @@ def pytest_configure(config):
     p = config.getoption("--eval-metrics-path")
     if p:
         os.environ["EVAL_METRICS_PATH"] = p
+
+@pytest.fixture(scope="session")
+def champion_auc(request):
+    value = request.config.getoption("--champion-auc")
+    if value is None:
+        pytest.fail("--champion-auc is required for the regression gate")
+
+    try:
+        return float(value)
+    except ValueError:
+        pytest.fail(f"--champion-auc must be numeric, got {value!r}")
+
+
