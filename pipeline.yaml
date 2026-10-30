@@ -19,6 +19,7 @@
 #         ArtifactsBucket=northstar-dev-cicd-artifacts-<account-id> \
 #         GitHubConnectionArn=arn:aws:codeconnections:us-east-1:<acct>:connection/<id> \
 #         SageMakerRoleArn=<ml_engineer_role_arn> \
+#         NotificationEmail=you@example.com \
 #     --capabilities CAPABILITY_NAMED_IAM
 
 AWSTemplateFormatVersion: "2010-09-09"
@@ -92,6 +93,17 @@ Parameters:
   SageMakerPipelineName:
     Type: String
     Default: northstar-churn-pipeline
+
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: >-
+      Optional email address for pipeline-state and build-failure notifications.
+      Leave blank to manage SNS subscriptions separately. Email subscriptions
+      must be confirmed by the recipient before notifications are delivered.
+
+Conditions:
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
 
 # ── Resources ──────────────────────────────────────────────────────────────────
 
@@ -300,6 +312,22 @@ Resources:
               Service: cloudwatch.amazonaws.com
             Action: sns:Publish
             Resource: !Ref ModelApprovalTopic
+          - Sid: AllowEventBridgePipelineNotifications
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref ModelApprovalTopic
+
+  # A subscription is created only when an address is supplied at deployment.
+  # The recipient must confirm SNS's subscription email before delivery starts.
+  NotificationEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasNotificationEmail
+    Properties:
+      Protocol: email
+      TopicArn: !Ref ModelApprovalTopic
+      Endpoint: !Ref NotificationEmail
 
   # ── Build-failure alarm ─────────────────────────────────────────────────────
   # Task 2 requires that a failed gate does not just halt the build but tells
@@ -432,6 +460,32 @@ Resources:
         #       InputArtifacts:
         #         - Name: BuildArtifact
 
+# Forward CodePipeline execution transitions to the same SNS topic used by
+# the build-failure alarm and manual-approval action.
+  PipelineStateChangeRule:
+    Type: AWS::Events::Rule
+    DependsOn: ModelApprovalTopicPolicy
+    Properties:
+      Name: !Sub "${ProjectName}-pipeline-state-change"
+      Description: Notify on NorthStar CodePipeline execution state changes
+      EventPattern:
+        source:
+          - aws.codepipeline
+        detail-type:
+          - CodePipeline Pipeline Execution State Change
+        detail:
+          pipeline:
+            - !Ref NorthStarPipeline
+          state:
+            - STARTED
+            - SUCCEEDED
+            - FAILED
+            - CANCELED
+      State: ENABLED
+      Targets:
+        - Id: PipelineStateChangeSnsTarget
+          Arn: !Ref ModelApprovalTopic
+
 # ── Outputs ────────────────────────────────────────────────────────────────────
 
 Outputs:
@@ -450,7 +504,12 @@ Outputs:
   ModelApprovalTopicArn:
     Value: !Ref ModelApprovalTopic
     Description: >-
-      Subscribe an address to this topic or approvals go unnoticed:
-        aws sns subscribe --topic-arn <arn> --protocol email --notification-endpoint you@example.com
+      Used for approvals, build-failure alarms, and pipeline state changes.
+      Pass NotificationEmail at deployment or subscribe an address manually;
+      email recipients must confirm the SNS subscription.
     Export:
       Name: !Sub "${ProjectName}-model-approvals-topic"
+
+  PipelineStateChangeRuleArn:
+    Value: !GetAtt PipelineStateChangeRule.Arn
+    Description: EventBridge rule that publishes CodePipeline state changes to SNS
